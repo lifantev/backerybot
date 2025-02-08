@@ -36,13 +36,13 @@ async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     response = save_to_excel(user.username, "Check-out")
     await update.message.reply_text(response)
 
-# Функция для сохранения данных в xlsx
+# Функция для сохранения данных в Excel
 def save_to_excel(username, action):
-    """Сохраняет данные о входе/выходе в файл xlsx с разделением по месяцам."""
+    """Сохраняет данные о входе/выходе в таблицу с пользователями в строках и днями в столбцах."""
     today = datetime.datetime.now()
-    month_sheet = today.strftime('%m-%Y')
-    date_str = today.strftime('%d-%m-%Y')
-    time_str = today.strftime('%H:%M')
+    month_sheet = today.strftime("%Y-%m")  # Пример: "2025-02"
+    day_col = today.strftime("%d")  # День месяца (01, 02, ..., 31)
+    time_str = today.strftime("%H:%M")  # Формат ЧЧ:ММ
 
     # Открываем или создаем файл
     if os.path.exists(FILE_PATH):
@@ -50,79 +50,65 @@ def save_to_excel(username, action):
     else:
         workbook = openpyxl.Workbook()
 
-    # Если лист для текущего месяца отсутствует, создаем его
+    # Если листа для текущего месяца нет, создаем его
     if month_sheet not in workbook.sheetnames:
         sheet = workbook.create_sheet(title=month_sheet)
-        sheet.append(["Дата", "Username", "Время Check-in", "Время Check-out", "Рабочее время"])  # Заголовки
+        sheet.append(["Username"] + [f"{day:02}" for day in range(1, 32)])  # Заголовки дней (01-31)
+
     else:
         sheet = workbook[month_sheet]
 
-    # Проверяем, есть ли уже запись о Check-in для этого пользователя в этот день
-    found_row = None
-    for row in sheet.iter_rows(min_row=2, values_only=True):  # Пропускаем заголовки
-        if row[0] == date_str and row[1] == username:
-            found_row = row
+    # Поиск строки пользователя (или добавление нового)
+    user_row = None
+    for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+        if row[0] == username:
+            user_row = row_idx
             break
 
+    if user_row is None:
+        user_row = sheet.max_row + 1
+        sheet.append([username] + [""] * 31)  # Добавляем новую строку
+
+    # Определение колонки для текущего дня
+    day_col_idx = int(day_col)  # Например, '05' → 5-й столбец
+    cell = sheet.cell(row=user_row, column=day_col_idx + 1)  # +1 из-за смещения Username
+
     if action == "Check-in":
-        if found_row:
-            return f"⚠️ {username}, вы уже отметились сегодня в {found_row[2]}!"
-        else:
-            sheet.append([date_str, username, time_str, "", ""])
-
-            format_as_table(sheet)
-            workbook.save(FILE_PATH)
-
-            return f"✅ {username}, ваш вход в {time_str} сохранен!"
-    
+        if cell.value:
+            return f"⚠️ {username}, вы уже отметились сегодня!"
+        cell.value = f"{time_str} - "
     elif action == "Check-out":
-        for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
-            if row[0] == date_str and row[1] == username and row[2]:  # Убеждаемся, что есть Check-in
-                sheet.cell(row=row_idx, column=4, value=time_str)  # Записываем Check-out
-                checkin_time = datetime.datetime.strptime(row[2], '%H:%M')
-                checkout_time = datetime.datetime.strptime(time_str, '%H:%M')
-
-                duration = checkout_time - checkin_time
-                hours, remainder = divmod(duration.seconds, 3600)
-                minutes = remainder // 60
-                formatted_duration = f"{hours:02}:{minutes:02}"  # Формат ЧЧ:ММ
-                sheet.cell(row=row_idx, column=5, value=formatted_duration)  # Записываем Work Duration
-
-                format_as_table(sheet)
-                workbook.save(FILE_PATH)
-
-                return f"❌ {username}, ваш выход в {time_str} сохранен! Рабочее время: {duration}"
+        if not cell.value or "-" not in cell.value:
+            return f"⚠️ {username}, отметьтесь через /checkin сначала!"
         
-        return f"⚠️ {username}, нет записи о входе сегодня! Пожалуйста, сначала отметьтесь через /checkin."
+        checkin_time = cell.value.split(" - ")[0]
+        checkout_time = time_str
+        duration = calculate_duration(checkin_time, checkout_time)
+        cell.value = f"{checkin_time} - {checkout_time} ({duration})"
 
+    # Форматируем таблицу
+    format_cells(sheet)
 
-# Функция для форматирования листа как таблицы
-def format_as_table(sheet):
-    """Добавляет фильтрацию и делает данные таблицей в Excel."""
-    if sheet.max_row < 2:
-        return  # Нет данных, нечего форматировать
-
-    table_ref = f"A1:E{sheet.max_row}"  # Определяем диапазон таблицы
-    table = Table(displayName="AttendanceTable", ref=table_ref)
-
-    # Стиль таблицы
-    style = TableStyleInfo(
-        name="TableStyleMedium9", showFirstColumn=False, 
-        showLastColumn=False, showRowStripes=True, showColumnStripes=False
-    )
-    table.tableStyleInfo = style
-
-    # Удаляем старую таблицу (если есть), чтобы избежать дублирования
-    sheet._tables.clear()
+    # Сохраняем файл
+    workbook.save(FILE_PATH)
     
-    # Добавляем новую таблицу
-    sheet.add_table(table)
-    
-    # Автоподгонка ширины колонок
-    autofit_columns(sheet)
-    
-def autofit_columns(sheet):
-    """Автоматически подгоняет ширину колонок по содержимому."""
+    return f"✅ {username}, ваш {action.lower()} в {time_str} сохранен!"
+
+
+# Функция вычисления разницы между check-in и check-out
+def calculate_duration(checkin, checkout):
+    """Вычисляет длительность работы в формате HH:MM."""
+    fmt = "%H:%M"
+    checkin_time = datetime.datetime.strptime(checkin, fmt)
+    checkout_time = datetime.datetime.strptime(checkout, fmt)
+    duration = checkout_time - checkin_time
+    hours, remainder = divmod(duration.seconds, 3600)
+    minutes = remainder // 60
+    return f"{hours:02}:{minutes:02}"
+
+# Функция форматирования таблицы (центрирование и автоширина)
+def format_cells(sheet):
+    """Центрирует значения во всех ячейках таблицы и подгоняет ширину колонок."""
     for col in sheet.columns:
         max_length = 0
         col_letter = col[0].column_letter  # Получаем букву колонки
@@ -131,6 +117,7 @@ def autofit_columns(sheet):
                 max_length = max(max_length, len(str(cell.value)))
                 # Применяем выравнивание по центру
                 cell.alignment = Alignment(horizontal="center", vertical="center")
+
         adjusted_width = max_length + 5  # Добавляем небольшой запас
         sheet.column_dimensions[col_letter].width = adjusted_width
 
