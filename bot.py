@@ -1,15 +1,17 @@
 import logging
 import openpyxl
-from openpyxl.styles import Alignment, PatternFill, Border, Side, Font
+from openpyxl.styles import Alignment, Border, Side, Font
+from openpyxl.utils import get_column_letter
 from telegram import Update
 from telegram.request import HTTPXRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import datetime 
+from calendar import monthrange
 import os
 from dotenv import load_dotenv
 
 # Файл для хранения данных
-FILE_PATH = 'attendance.xlsx'
+FILENAME = 'attendance.xlsx'
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -23,120 +25,118 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "❌ /checkout - Отметить уход"
     )
 
-# Функция для отметки прихода (Check-in)
-async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.message.from_user
-    response = save_to_excel(user.username, "Check-in")
-    await update.message.reply_text(response)
-
-# Функция для отметки ухода (Check-out)
-async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.message.from_user
-    response = save_to_excel(user.username, "Check-out")
-    await update.message.reply_text(response)
-
-# Функция для сохранения данных в Excel
-def save_to_excel(username, action):
-    """Сохраняет данные о входе/выходе в таблицу с пользователями в строках и днями в столбцах."""
-    today = datetime.datetime.now()
-    month_sheet = today.strftime("%Y-%m")  # Пример: "2025-02"
-    day_col = today.strftime("%d")  # День месяца (01, 02, ..., 31)
-    time_str = today.strftime("%H:%M")  # Формат ЧЧ:ММ
-
-    # Открываем или создаем файл
-    if os.path.exists(FILE_PATH):
-        workbook = openpyxl.load_workbook(FILE_PATH)
+# Ensure the spreadsheet is properly structured
+def setup_attendance_sheet():
+    now = datetime.datetime.now()
+    sheet_name = f"{now.strftime('%B')} {now.year}"
+    
+    # Load or create workbook
+    if os.path.exists(FILENAME):
+        workbook = openpyxl.load_workbook(FILENAME)
     else:
         workbook = openpyxl.Workbook()
 
-    # Если листа для текущего месяца нет, создаем его
-    if month_sheet not in workbook.sheetnames:
-        sheet = workbook.create_sheet(title=month_sheet)
-        # Set headers based on the number of days in the current month
-        days_in_month = (datetime.datetime(today.year, today.month + 1, 1) - datetime.timedelta(days=1)).day
-        sheet.append(["Username"] + [f"{day:02}" for day in range(1, days_in_month + 1)])
+    # If sheet for current month doesn't exist, create it
+    if sheet_name not in workbook.sheetnames:
+        workbook.create_sheet(sheet_name)
+        sheet = workbook[sheet_name]
+        
+        # Get number of days in month
+        days_in_month = monthrange(now.year, now.month)[1]
 
-    else:
-        sheet = workbook[month_sheet]
+        # Styles
+        bold_font = Font(bold=True)
+        center_align = Alignment(horizontal="center", vertical="center")
+        border_style = Border(left=Side(style="thin"), right=Side(style="thin"),
+                              top=Side(style="thin"), bottom=Side(style="thin"))
 
-    # Поиск строки пользователя (или добавление нового)
+        # Headers
+        sheet["A1"] = "Username"
+        sheet["A1"].font = bold_font
+        sheet["A1"].alignment = center_align
+        sheet.column_dimensions["A"].width = 15  # Username column width
+
+        # Create columns for each day (merged headers)
+        col = 2
+        for day in range(1, days_in_month + 1):
+            col_start = get_column_letter(col)
+            col_end = get_column_letter(col + 3)
+            sheet.merge_cells(f"{col_start}1:{col_end}1")
+            sheet[f"{col_start}1"] = str(day)
+            sheet[f"{col_start}1"].font = bold_font
+            sheet[f"{col_start}1"].alignment = center_align
+
+            # Sub-headers
+            sub_headers = ["Check-in", "Check-out", "Duration", "Comment"]
+            for i, header in enumerate(sub_headers):
+                cell = sheet[f"{get_column_letter(col + i)}2"]
+                cell.value = header
+                cell.font = bold_font
+                cell.alignment = center_align
+
+            col += 4
+
+        # Apply formatting
+        for row in sheet.iter_rows():
+            for cell in row:
+                cell.alignment = center_align
+                cell.border = border_style
+
+        workbook.save(FILENAME)
+
+# Save check-in or check-out data
+async def record_attendance(username, action):
+    setup_attendance_sheet()
+    now = datetime.datetime.now()
+    sheet_name = f"{now.strftime('%B')} {now.year}"
+    workbook = openpyxl.load_workbook(FILENAME)
+    sheet = workbook[sheet_name]
+
+    # Find or create user row
     user_row = None
-    for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
-        if row[0] == username:
-            user_row = row_idx
+    for row in range(3, sheet.max_row + 1):
+        if sheet[f"A{row}"].value == username:
+            user_row = row
             break
 
-    if user_row is None:
+    if not user_row:
         user_row = sheet.max_row + 1
-        sheet.append([username])  # Добавляем новую строку
+        sheet[f"A{user_row}"] = username
 
-    # Определение колонки для текущего дня
-    day_col_idx = int(day_col)  # Например, '05' → 5-й столбец
-    cell = sheet.cell(row=user_row, column=day_col_idx + 1)  # +1 из-за смещения Username
+    # Find the correct column
+    day_col_start = 2 + (now.day - 1) * 4
+    checkin_cell = sheet[f"{get_column_letter(day_col_start)}{user_row}"]
+    checkout_cell = sheet[f"{get_column_letter(day_col_start + 1)}{user_row}"]
+    duration_cell = sheet[f"{get_column_letter(day_col_start + 2)}{user_row}"]
 
-    if action == "Check-in":
-        if cell.value:
-            return f"⚠️ {username}, вы уже отметились сегодня!"
-        cell.value = f"{time_str} - "
-    elif action == "Check-out":
-        if not cell.value or "-" not in cell.value:
-            return f"⚠️ {username}, отметьтесь через /checkin сначала!"
-        
-        checkin_time = cell.value.split(" - ")[0]
-        checkout_time = time_str
-        duration = calculate_duration(checkin_time, checkout_time)
-        cell.value = f"{checkin_time} - {checkout_time} ({duration})"
+    # Store timestamps
+    time_now = now.strftime("%HH:%MM")
+    if action == "checkin":
+        checkin_cell.value = time_now
+    elif action == "checkout":
+        checkout_cell.value = time_now
 
-    # Форматируем таблицу
-    format_cells(sheet)
+        # Calculate duration
+        if checkin_cell.value:
+            fmt = "%HH:%MM"
+            checkin_time = datetime.datetime.strptime(checkin_cell.value, fmt)
+            checkout_time = datetime.datetime.strptime(time_now, fmt)
+            duration = checkout_time - checkin_time
+            duration_cell.value = f"{duration.seconds // 3600}:{(duration.seconds % 3600) // 60}"
 
-    # Сохраняем файл
-    workbook.save(FILE_PATH)
-    
-    return f"✅ {username}, ваш {action.lower()} в {time_str} сохранен!"
+    workbook.save(FILENAME)
 
-# Функция вычисления разницы между check-in и check-out
-def calculate_duration(checkin, checkout):
-    """Вычисляет длительность работы в формате HH:MM."""
-    fmt = "%H:%M"
-    checkin_time = datetime.datetime.strptime(checkin, fmt)
-    checkout_time = datetime.datetime.strptime(checkout, fmt)
-    duration = checkout_time - checkin_time
-    hours, remainder = divmod(duration.seconds, 3600)
-    minutes = remainder // 60
-    return f"{hours:02}:{minutes:02}"
+# Handle /checkin command
+async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await record_attendance(user.username, "checkin")
+    await update.message.reply_text(f"✅ {user.username}, you have checked in!")
 
-# Функция форматирования таблицы (центрирование, автоширина, стилизация)
-def format_cells(sheet):
-    """Центрирует значения, подгоняет ширину колонок и добавляет стили."""
-    for col in sheet.columns:
-        max_length = 0
-        col_letter = col[0].column_letter  # Получаем букву колонки
-        for cell in col:
-            if cell.value:
-                max_length = max(max_length, len(str(cell.value)))
-            cell.alignment = Alignment(horizontal="center", vertical="center")  # Центрируем
-            cell.border = Border(
-                left=Side(style='thin'),
-                right=Side(style='thin'),
-                top=Side(style='thin'),
-                bottom=Side(style='thin')
-            )
-
-        adjusted_width = max_length + 2  # Добавляем небольшой запас
-        sheet.column_dimensions[col_letter].width = adjusted_width
-    
-    # Apply alternating colors for readability
-    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
-        for i, cell in enumerate(row):
-            if i % 2 == 0:  # Alternate colors for columns
-                cell.fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
-            else:
-                cell.fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
-    
-    # Apply bold and style headers
-    for cell in sheet[1]:
-        cell.font = Font(bold=True)
+# Handle /checkout command
+async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await record_attendance(user.username, "checkout")
+    await update.message.reply_text(f"✅ {user.username}, you have checked out!")
 
 
 # Основная функция
