@@ -1,7 +1,6 @@
 import logging
 import openpyxl
-from openpyxl.worksheet.table import Table, TableStyleInfo
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, PatternFill, Border, Side, Font
 from telegram import Update
 from telegram.request import HTTPXRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -53,7 +52,9 @@ def save_to_excel(username, action):
     # Если листа для текущего месяца нет, создаем его
     if month_sheet not in workbook.sheetnames:
         sheet = workbook.create_sheet(title=month_sheet)
-        sheet.append(["Username"] + [f"{day:02}" for day in range(1, 32)])  # Заголовки дней (01-31)
+        # Set headers based on the number of days in the current month
+        days_in_month = (datetime.datetime(today.year, today.month + 1, 1) - datetime.timedelta(days=1)).day
+        sheet.append(["Username"] + [f"{day:02}" for day in range(1, days_in_month + 1)])
 
     else:
         sheet = workbook[month_sheet]
@@ -67,7 +68,7 @@ def save_to_excel(username, action):
 
     if user_row is None:
         user_row = sheet.max_row + 1
-        sheet.append([username] + [""] * 31)  # Добавляем новую строку
+        sheet.append([username])  # Добавляем новую строку
 
     # Определение колонки для текущего дня
     day_col_idx = int(day_col)  # Например, '05' → 5-й столбец
@@ -94,7 +95,6 @@ def save_to_excel(username, action):
     
     return f"✅ {username}, ваш {action.lower()} в {time_str} сохранен!"
 
-
 # Функция вычисления разницы между check-in и check-out
 def calculate_duration(checkin, checkout):
     """Вычисляет длительность работы в формате HH:MM."""
@@ -106,20 +106,38 @@ def calculate_duration(checkin, checkout):
     minutes = remainder // 60
     return f"{hours:02}:{minutes:02}"
 
-# Функция форматирования таблицы (центрирование и автоширина)
+# Функция форматирования таблицы (центрирование, автоширина, стилизация)
 def format_cells(sheet):
-    """Центрирует значения во всех ячейках таблицы и подгоняет ширину колонок."""
+    """Центрирует значения, подгоняет ширину колонок и добавляет стили."""
     for col in sheet.columns:
         max_length = 0
         col_letter = col[0].column_letter  # Получаем букву колонки
         for cell in col:
             if cell.value:
                 max_length = max(max_length, len(str(cell.value)))
-                # Применяем выравнивание по центру
-                cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.alignment = Alignment(horizontal="center", vertical="center")  # Центрируем
+            cell.border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
 
-        adjusted_width = max_length + 5  # Добавляем небольшой запас
+        adjusted_width = max_length + 2  # Добавляем небольшой запас
         sheet.column_dimensions[col_letter].width = adjusted_width
+    
+    # Apply alternating colors for readability
+    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
+        for i, cell in enumerate(row):
+            if i % 2 == 0:  # Alternate colors for columns
+                cell.fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
+            else:
+                cell.fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+    
+    # Apply bold and style headers
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+
 
 # Основная функция
 def main():
