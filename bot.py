@@ -1,6 +1,6 @@
 import logging
 import openpyxl
-from openpyxl.styles import Alignment, Border, Side, Font
+from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from telegram import Update
 from telegram.request import HTTPXRequest
@@ -14,8 +14,20 @@ from dotenv import load_dotenv
 FILENAME = 'attendance.xlsx'
 
 # Настройка логирования
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.WARN)
 
+# Headers
+sub_headers = ["Check-in", "Check-out", "Duration"]
+
+# Columns
+first_day_col = 4
+
+# Styles
+bold_font = Font(bold=True)
+center_align = Alignment(horizontal="center", vertical="center")
+border_style = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
+color0="E0E0E0"
+color1="FFFFFF"
 
 # Функция для начала взаимодействия
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -28,7 +40,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # Ensure the spreadsheet is properly structured
 def setup_attendance_sheet():
     now = datetime.datetime.now()
-    sheet_name = f"{now.strftime('%B')} {now.year}"
+    sheet_name = now.strftime("%m-%Y")
     
     # Load or create workbook
     if os.path.exists(FILENAME):
@@ -44,37 +56,37 @@ def setup_attendance_sheet():
         # Get number of days in month
         days_in_month = monthrange(now.year, now.month)[1]
 
-        # Styles
-        bold_font = Font(bold=True)
-        center_align = Alignment(horizontal="center", vertical="center")
-        border_style = Border(left=Side(style="thin"), right=Side(style="thin"),
-                              top=Side(style="thin"), bottom=Side(style="thin"))
-
         # Headers
         sheet["A1"] = "Username"
-        sheet["A1"].font = bold_font
-        sheet["A1"].alignment = center_align
-        sheet.column_dimensions["A"].width = 15  # Username column width
+        sheet["B1"] = "Total (1-15)"
+        sheet["C1"] = "Total (16-End)"
+        for col in ["A", "B", "C"]:
+            sheet[col + "1"].font = bold_font
+            sheet[col + "1"].alignment = center_align
+            sheet.column_dimensions[col].width = 15  # Adjust column widths
 
         # Create columns for each day (merged headers)
-        col = 2
+        col = first_day_col
         for day in range(1, days_in_month + 1):
             col_start = get_column_letter(col)
-            col_end = get_column_letter(col + 3)
+            col_end = get_column_letter(col + len(sub_headers) - 1)
             sheet.merge_cells(f"{col_start}1:{col_end}1")
             sheet[f"{col_start}1"] = str(day)
             sheet[f"{col_start}1"].font = bold_font
             sheet[f"{col_start}1"].alignment = center_align
+            color = color0 if day % 2 == 0 else color1
+            sheet[f"{col_start}1"].fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+
 
             # Sub-headers
-            sub_headers = ["Check-in", "Check-out", "Duration", "Comment"]
             for i, header in enumerate(sub_headers):
                 cell = sheet[f"{get_column_letter(col + i)}2"]
                 cell.value = header
                 cell.font = bold_font
                 cell.alignment = center_align
+                cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
 
-            col += 4
+            col += len(sub_headers)
 
         # Apply formatting
         for row in sheet.iter_rows():
@@ -83,12 +95,33 @@ def setup_attendance_sheet():
                 cell.border = border_style
 
         workbook.save(FILENAME)
+        
+def setup_new_user(sheet, user_row):
+    now = datetime.datetime.now()
+    days_in_month = monthrange(now.year, now.month)[1]
+
+    for col in ["A", "B", "C"]:
+        cell = sheet[f"{col}{user_row}"]
+        cell.alignment = center_align
+        cell.border = border_style
+
+    col = first_day_col
+    for day in range(1, days_in_month + 1):
+        color = color0 if day % 2 == 0 else color1
+        for i in range(len(sub_headers)):
+            cell = sheet[f"{get_column_letter(col + i)}{user_row}"]
+            cell.alignment = center_align
+            cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+            cell.border = border_style
+        col += len(sub_headers)
+
+    update_total_formulas(sheet, user_row, now.month)
 
 # Save check-in or check-out data
 async def record_attendance(username, action):
     setup_attendance_sheet()
     now = datetime.datetime.now()
-    sheet_name = f"{now.strftime('%B')} {now.year}"
+    sheet_name = now.strftime("%m-%Y")
     workbook = openpyxl.load_workbook(FILENAME)
     sheet = workbook[sheet_name]
 
@@ -102,29 +135,56 @@ async def record_attendance(username, action):
     if not user_row:
         user_row = sheet.max_row + 1
         sheet[f"A{user_row}"] = username
+        setup_new_user(sheet, user_row)
 
     # Find the correct column
-    day_col_start = 2 + (now.day - 1) * 4
+    day_col_start = first_day_col + (now.day - 1) * len(sub_headers)
     checkin_cell = sheet[f"{get_column_letter(day_col_start)}{user_row}"]
     checkout_cell = sheet[f"{get_column_letter(day_col_start + 1)}{user_row}"]
     duration_cell = sheet[f"{get_column_letter(day_col_start + 2)}{user_row}"]
 
     # Store timestamps
-    time_now = now.strftime("%HH:%MM")
     if action == "checkin":
-        checkin_cell.value = time_now
+        checkin_cell.value = now
+        checkin_cell.number_format = "hh:mm"
+
     elif action == "checkout":
-        checkout_cell.value = time_now
+        checkout_cell.value = now
+        checkout_cell.number_format = "hh:mm"
 
         # Calculate duration
         if checkin_cell.value:
-            fmt = "%HH:%MM"
-            checkin_time = datetime.datetime.strptime(checkin_cell.value, fmt)
-            checkout_time = datetime.datetime.strptime(time_now, fmt)
+            checkin_time = checkin_cell.value
+            checkout_time = checkout_cell.value
+
             duration = checkout_time - checkin_time
-            duration_cell.value = f"{duration.seconds // 3600}:{(duration.seconds % 3600) // 60}"
+            duration_days = duration.total_seconds() / 86400  # Store as fraction of a day
+            
+            duration_cell.value = duration_days  
+            duration_cell.number_format = "[h]:mm"
 
     workbook.save(FILENAME)
+
+# Update total formulas for each user row
+def update_total_formulas(sheet, user_row, month):
+    days_in_month = monthrange(datetime.datetime.now().year, month)[1]
+
+    duration_cols_1_15 = []
+    duration_cols_16_end = []
+
+    for day in range(1, days_in_month + 1):
+        duration_col = get_column_letter(6 + (day - 1) * len(sub_headers))
+        if day <= 15:
+            duration_cols_1_15.append(f"{duration_col}{user_row}")
+        else:
+            duration_cols_16_end.append(f"{duration_col}{user_row}")
+
+    sheet[f"B{user_row}"] = f"=ROUNDUP(SUM({','.join(duration_cols_1_15)}), 3)"
+    sheet[f"B{user_row}"].number_format = "[h]:mm"
+
+    sheet[f"C{user_row}"] = f"=ROUNDUP(SUM({','.join(duration_cols_16_end)}), 3)"
+    sheet[f"C{user_row}"].number_format = "[h]:mm"
+
 
 # Handle /checkin command
 async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
