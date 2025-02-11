@@ -1,16 +1,23 @@
 import logging
-import openpyxl
-from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter as col_let
 from telegram import Update
 from telegram.request import HTTPXRequest
 from telegram.ext import ApplicationBuilder, CommandHandler
-import datetime
+from datetime import datetime
 from calendar import monthrange
 import os
 from dotenv import load_dotenv
 import gspread
-from gspread import Spreadsheet
+from gspread import Spreadsheet, Worksheet
+from gspread_formatting import (
+    CellFormat,
+    Color,
+    Borders,
+    Border,
+    TextFormat,
+    format_cell_range,
+    set_column_width,
+)
 from oauth2client.service_account import ServiceAccountCredentials
 
 logging.basicConfig(
@@ -19,155 +26,141 @@ logging.basicConfig(
 
 
 # Headers
-sub_headers = ["Check-in", "Check-out", "Duration"]
+sub_headers = ["Check-in", "Check-out", "Длительность"]
 
 # Columns
 days_start_col = 4
 
 # Styles
-font_bold = Font(bold=True)
-align_center = Alignment(horizontal="center", vertical="center")
-border_thin = Border(
-    left=Side(style="thin"),
-    right=Side(style="thin"),
-    top=Side(style="thin"),
-    bottom=Side(style="thin"),
+border_thin = Borders(
+    top=Border(style="SOLID"),
+    bottom=Border(style="SOLID"),
+    left=Border(style="SOLID"),
+    right=Border(style="SOLID"),
 )
-color_grey = "E0E0E0"
-color_white = "FFFFFF"
+color_grey = Color(red=0.95, green=0.95, blue=0.95)
+color_white = Color(red=1, green=1, blue=1)
 
 
 def apply_styles(
-    cell, border=border_thin, alignment=align_center, font=None, color=None
+    sheet: Worksheet,
+    cell_range: str,
+    bold=False,
+    color=None,
 ):
-    if font:
-        cell.font = font
-    if alignment:
-        cell.alignment = alignment
-    if border:
-        cell.border = border
+    fmt = CellFormat(
+        textFormat=TextFormat(bold=bold),
+        horizontalAlignment="CENTER",
+        borders=border_thin,
+    )
     if color:
-        cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+        fmt.backgroundColor = color
+
+    format_cell_range(sheet, cell_range, fmt)
 
 
-def setup_attendance_sheet():
-    now = datetime.datetime.now()
+async def record_attendance(
+    action: str, username: str | None, spreadsheet: Spreadsheet
+):
+    now = datetime.now()
+    sheet = setup_attendance_sheet(spreadsheet, now)
+    user_row = setup_user_row(sheet, username, now)
+
+    now = datetime.now()
+    col = days_start_col + (now.day - 1) * len(sub_headers)
+    checkin_cell = (user_row, col)
+    checkout_cell = (user_row, col + 1)
+    duration_cell = (user_row, col + 2)
+
+    if action == "checkin":
+        sheet.update_cell(*checkin_cell, now.strftime("%H:%M"))
+    elif action == "checkout":
+        sheet.update_cell(*checkout_cell, now.strftime("%H:%M"))
+        sheet.update_cell(
+            *duration_cell,
+            f"= {col_let(col+1)}{user_row} - {col_let(col)}{user_row}",
+        )
+
+
+def setup_attendance_sheet(spreadsheet: Spreadsheet, now: datetime) -> Worksheet:
     sheet_name = now.strftime("%m-%Y")
 
-    if os.path.exists(FILENAME):
-        workbook = openpyxl.load_workbook(FILENAME)
-    else:
-        workbook = openpyxl.Workbook()
-
-    if sheet_name not in workbook.sheetnames:
-        workbook.create_sheet(sheet_name)
-        sheet = workbook[sheet_name]
+    try:
+        sheet = spreadsheet.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="100")
 
         days_in_month = monthrange(now.year, now.month)[1]
 
-        sheet["A1"] = "Username"
-        sheet["B1"] = "Total (1-15)"
-        sheet["C1"] = "Total (16-End)"
-        for col in ["A", "B", "C"]:
-            apply_styles(sheet[f"{col}1"], font=font_bold)
-            apply_styles(sheet[f"{col}2"], font=font_bold)
-            sheet.column_dimensions[col].width = 15
+        row1 = ["Username", "Total (1-15)", "Total (16-End)"] + [
+            val for day in range(1, days_in_month + 1) for val in [str(day), "", ""]
+        ]
+        row2 = ["", "", ""] + sub_headers * days_in_month
+        # apply_styles(sheet, "A1:C2", bold=True)
+        # set_column_width(sheet, "A:C", 15)
 
         col = days_start_col
-        for day in range(1, days_in_month + 1):
-            col_start = get_column_letter(col)
-            col_end = get_column_letter(col + len(sub_headers) - 1)
+        for _ in range(days_in_month):
+            col_start = col_let(col)
+            col_end = col_let(col + len(sub_headers) - 1)
             sheet.merge_cells(f"{col_start}1:{col_end}1")
 
-            cell = sheet[f"{col_start}1"]
-            cell.value = str(day)
-            color = color_grey if day % 2 == 0 else color_white
-            apply_styles(cell, font=font_bold, color=color)
-
-            for i, header in enumerate(sub_headers):
-                cell = sheet[f"{get_column_letter(col + i)}2"]
-                cell.value = header
-                apply_styles(cell, font=font_bold, color=color)
-
+            # cell = f"{col_start}1"
+            # color = color_grey if day % 2 == 0 else color_white
+            # apply_styles(sheet, cell, bold=True, color=color)
+            # apply_styles(
+            #     sheet,
+            #     f"{col_let(col)}2:{col_let(col + len(sub_headers)- 1)}2",
+            #     bold=True,
+            #     color=color,
+            # )
             col += len(sub_headers)
 
-        workbook.save(FILENAME)
+        sheet.update([row1, row2])
+
+    return sheet
 
 
-def setup_new_user(sheet, user_row):
-    now = datetime.datetime.now()
+def setup_user_row(sheet: Worksheet, username: str | None, now: datetime) -> int:
+    usernames = sheet.col_values(1)
+    if username in usernames:
+        return usernames.index(username) + 1
+
+    user_row = 3 if len(usernames) == 1 else len(usernames) + 1
+    sheet.update_cell(user_row, 1, username)
+
+    # apply_styles(sheet, f"A{user_row}:C{user_row}", bold=True)
+
     days_in_month = monthrange(now.year, now.month)[1]
 
-    for col in ["A", "B", "C"]:
-        cell = sheet[f"{col}{user_row}"]
-        apply_styles(cell, font=font_bold)
+    # col = days_start_col
+    # for day in range(1, days_in_month + 1):
+    #     color = color_grey if day % 2 == 0 else color_white
+    #     cells = (
+    #         f"{col_let(col)}{user_row}:{col_let(col + len(sub_headers) - 1)}{user_row}"
+    #     )
+    #     apply_styles(sheet, cells, color=color)
+    #     col += len(sub_headers)
 
-    col = days_start_col
+    setup_total_formulas(sheet, user_row, days_in_month)
+
+    return user_row
+
+
+def setup_total_formulas(sheet: Worksheet, user_row: int, days_in_month: int):
+    duration_cols_1, duration_cols_2 = [], []
     for day in range(1, days_in_month + 1):
-        color = color_grey if day % 2 == 0 else color_white
-        for i in range(len(sub_headers)):
-            cell = sheet[f"{get_column_letter(col + i)}{user_row}"]
-            apply_styles(cell, color=color)
-        col += len(sub_headers)
-
-    setup_total_formulas(sheet, user_row, now.month)
-
-
-async def record_attendance(action, username, filename):
-    setup_attendance_sheet()
-    now = datetime.datetime.now()
-    sheet_name = now.strftime("%m-%Y")
-    workbook = openpyxl.load_workbook(filename)
-    sheet = workbook[sheet_name]
-
-    user_row = None
-    for row in range(3, sheet.max_row + 1):
-        if sheet[f"A{row}"].value == username:
-            user_row = row
-            break
-    if not user_row:
-        user_row = sheet.max_row + 1
-        sheet[f"A{user_row}"] = username
-        setup_new_user(sheet, user_row)
-
-    col = days_start_col + (now.day - 1) * len(sub_headers)
-    checkin_cell = sheet[f"{get_column_letter(col)}{user_row}"]
-    checkout_cell = sheet[f"{get_column_letter(col + 1)}{user_row}"]
-    duration_cell = sheet[f"{get_column_letter(col + 2)}{user_row}"]
-
-    if action == "checkin":
-        checkin_cell.value = now
-        checkin_cell.number_format = "hh:mm"
-    elif action == "checkout":
-        checkout_cell.value = now
-        checkout_cell.number_format = "hh:mm"
-        duration_cell.value = f"={get_column_letter(col+1)}{user_row} - {get_column_letter(col)}{user_row}"
-        duration_cell.number_format = "hh:mm"
-
-    workbook.save(filename)
-
-
-def setup_total_formulas(sheet, user_row, month):
-    days_in_month = monthrange(datetime.datetime.now().year, month)[1]
-    duration_cols_1 = []
-    duration_cols_2 = []
-
-    for day in range(1, days_in_month + 1):
-        duration_col = get_column_letter(6 + (day - 1) * len(sub_headers))
+        duration_col = col_let(6 + (day - 1) * len(sub_headers))
         if day <= 15:
             duration_cols_1.append(f"{duration_col}{user_row}")
         else:
             duration_cols_2.append(f"{duration_col}{user_row}")
 
-    sheet[f"B{user_row}"] = f"=ROUNDUP(SUM({','.join(duration_cols_1)}), 3)"
-    sheet[f"B{user_row}"].number_format = "[h]:mm"
-
-    sheet[f"C{user_row}"] = f"=ROUNDUP(SUM({','.join(duration_cols_2)}), 3)"
-    sheet[f"C{user_row}"].number_format = "[h]:mm"
+    sheet.update_acell(f"B{user_row}", f"= {'+'.join(duration_cols_1)}")
+    sheet.update_acell(f"C{user_row}", f"= {'+'.join(duration_cols_2)}")
 
 
 class ActionHandler:
-
     def __init__(self, spreadsheet: Spreadsheet):
         self.spreadsheet = spreadsheet
 
@@ -180,13 +173,13 @@ class ActionHandler:
 
     async def checkin(self, update: Update, context):
         user = update.effective_user
-        await record_attendance(user.username, "checkin", self.spreadsheet)
+        await record_attendance("checkin", user.username, self.spreadsheet)
         await update.message.reply_text(f"✅ {user.username}, you have checked in!")
 
     async def checkout(self, update: Update, context):
         user = update.effective_user
-        await record_attendance(user.username, "checkout", self.spreadsheet)
-        await update.message.reply_text(f"✅ {user.username}, you have checked out!")
+        await record_attendance("checkout", user.username, self.spreadsheet)
+        await update.message.reply_text(f"❌ {user.username}, you have checked out!")
 
 
 def main():
