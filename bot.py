@@ -3,7 +3,7 @@ from openpyxl.utils import get_column_letter as col_let
 from telegram import Update
 from telegram.request import HTTPXRequest
 from telegram.ext import ApplicationBuilder, CommandHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 from calendar import monthrange
 import os
 from dotenv import load_dotenv
@@ -21,7 +21,8 @@ logging.basicConfig(
 sub_headers = ["Приход", "Уход", "Итог"]
 
 # Columns
-days_start_col = 4
+days_start_col = 3
+weekdays = ["Пн ", "Вт ", "Ср ", "Чт ", "Пт ", "Сб ", "Вс "]
 
 # Styles
 border_thin = {
@@ -46,6 +47,10 @@ def format(bold=False, color=None):
     return fmt
 
 
+def get_week_start(now: datetime) -> datetime:
+    return now - timedelta(days=now.weekday())
+
+
 def record_attendance(
     action: str, username: str | None, spreadsheet: Spreadsheet
 ) -> str:
@@ -54,7 +59,8 @@ def record_attendance(
     user_row = setup_user_row(sheet, username, now)
 
     now = datetime.now()
-    col = days_start_col + (now.day - 1) * len(sub_headers)
+    col_offset = (now.weekday()) * len(sub_headers)
+    col = days_start_col + col_offset
     checkin_cell = (user_row, col)
     checkout_cell = (user_row, col + 1)
     duration_cell = (user_row, col + 2)
@@ -62,22 +68,20 @@ def record_attendance(
     if action == "checkin":
         value = sheet.cell(*checkin_cell).value
         if value:
-            return f"⚠️ {username}, вы уже отметились сегодня в {value}!"
+            return f"🫨 ты уже отметилась сегодня в {value}! пиши Марусе, она поможет тебе с этим"
 
         checkin_time = now.strftime("%H:%M")
         sheet.update_cell(*checkin_cell, checkin_time)
-        return f"✅ {username}, ваш вход в {checkin_time} сохранен!"
+        return f"🐥 утёнок пришел на работу в {checkin_time}\nхорошей смены!"
 
     elif action == "checkout":
         checkin_time = sheet.cell(*checkin_cell).value
         if not checkin_time:
-            return f"⚠️ {username}, нет записи о входе сегодня! Пожалуйста, сначала отметьтесь через /checkin."
+            return f"😔 ты забыла отметиться на приход! пожалуйста, сначала отметься через /checkin"
 
         checkout_time = sheet.cell(*checkout_cell).value
         if checkout_time:
-            return (
-                f"⚠️ {username}, вы уже отметились об уходе сегодня в {checkout_time}!"
-            )
+            return f"🤬 ты уже ушла сегодня в {checkout_time}! иди домой"
 
         checkout_time_str = now.strftime("%H:%M")
         sheet.update_cell(*checkout_cell, checkout_time_str)
@@ -92,29 +96,29 @@ def record_attendance(
         duration_hours, remain = divmod(duration.seconds, 3600)
         duration_minutes = remain // 60
         duration_str = f"{duration_hours:02}:{duration_minutes:02}"
-        return f"❌ {username}, ваш выход в {checkout_time_str} сохранен! Рабочее время: {duration_str}"
+        return f"🫡 фух, ушла вовремя! в {checkout_time_str} была сделана вся работа!\nрабочее время: {duration_str}"
 
 
 def setup_attendance_sheet(spreadsheet: Spreadsheet, now: datetime) -> Worksheet:
-    sheet_name = now.strftime("%m-%Y")
+    week_start = get_week_start(now)
+    week_end = week_start + timedelta(days=6)
+    sheet_name = week_start.strftime("%d.%m") + "-" + week_end.strftime("%d.%m")
 
     try:
         sheet = spreadsheet.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
-        sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="100")
+        sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="50")
 
-        days_in_month = monthrange(now.year, now.month)[1]
-
-        row1 = ["Имя", "Часы 1-15", "Часы 16-end"] + [
-            val
-            for day in range(1, days_in_month + 1)
-            for val in [f"{day:02}.{now.month:02}", "", ""]
+        row1 = ["Имя", "Часы"] + [
+            f"{day} {(week_start + timedelta(days=i)).strftime('%d.%m')}"
+            for i, day in enumerate(weekdays)
+            for _ in sub_headers
         ]
-        row2 = ["", "", ""] + sub_headers * days_in_month
+        row2 = ["", ""] + sub_headers * len(weekdays)
 
         col = days_start_col
-        formats = [{"range": "A1:C2", "format": format(bold=True)}]
-        for i in range(days_in_month):
+        formats = [{"range": "A1:B2", "format": format(bold=True)}]
+        for i in range(len(weekdays)):
             col_start = col_let(col)
             col_end = col_let(col + len(sub_headers) - 1)
             sheet.merge_cells(f"{col_start}1:{col_end}1")
@@ -129,7 +133,7 @@ def setup_attendance_sheet(spreadsheet: Spreadsheet, now: datetime) -> Worksheet
             col += len(sub_headers)
 
         sheet.update([row1, row2])
-        set_column_width(sheet, "D:CV", 54)
+        set_column_width(sheet, "C:W", 54)
         sheet.batch_format(formats)
 
     return sheet
@@ -143,11 +147,9 @@ def setup_user_row(sheet: Worksheet, username: str | None, now: datetime) -> int
     user_row = 3 if len(usernames) == 1 else len(usernames) + 1
     sheet.update_cell(user_row, 1, username)
 
-    days_in_month = monthrange(now.year, now.month)[1]
-
-    formats = [{"range": f"A{user_row}:C{user_row}", "format": format(bold=True)}]
+    formats = [{"range": f"A{user_row}:B{user_row}", "format": format(bold=True)}]
     col = days_start_col
-    for i in range(days_in_month):
+    for i in range(len(weekdays)):
         col_start = col_let(col)
         col_end = col_let(col + len(sub_headers) - 1)
         color = color_grey if i % 2 == 0 else color_white
@@ -159,22 +161,18 @@ def setup_user_row(sheet: Worksheet, username: str | None, now: datetime) -> int
         )
         col += len(sub_headers)
 
-    setup_total_formulas(sheet, user_row, days_in_month)
+    setup_total_formulas(sheet, user_row)
     sheet.batch_format(formats)
     return user_row
 
 
-def setup_total_formulas(sheet: Worksheet, user_row: int, days_in_month: int):
-    duration_cols_1, duration_cols_2 = [], []
-    for day in range(1, days_in_month + 1):
-        duration_col = col_let(6 + (day - 1) * len(sub_headers))
-        if day <= 15:
-            duration_cols_1.append(f"{duration_col}{user_row}")
-        else:
-            duration_cols_2.append(f"{duration_col}{user_row}")
+def setup_total_formulas(sheet: Worksheet, user_row: int):
+    duration_cols_1 = []
+    for day in range(1, len(weekdays) + 1):
+        duration_col = col_let(days_start_col - 1 + day * len(sub_headers))
+        duration_cols_1.append(f"{duration_col}{user_row}")
 
     sheet.update_acell(f"B{user_row}", f"= {'+'.join(duration_cols_1)}")
-    sheet.update_acell(f"C{user_row}", f"= {'+'.join(duration_cols_2)}")
 
 
 class ActionHandler:
@@ -183,9 +181,9 @@ class ActionHandler:
 
     async def start(self, update: Update, context):
         await update.message.reply_text(
-            "Добро пожаловать! Используйте команды:\n"
-            "✅ /checkin - Отметить приход\n"
-            "❌ /checkout - Отметить уход"
+            "привет, утёнок! теперь мы, прям как на заводе:\n"
+            "🐥 /checkin - отметить приход\n"
+            "🫡 /checkout - отметить уход"
         )
 
     async def checkin(self, update: Update, context):
